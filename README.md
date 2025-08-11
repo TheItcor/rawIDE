@@ -11,7 +11,9 @@ python3 src/rawIDE.py
 ```
 
 Only two modes:
+
 **Editor mode** -- esc --> **Command mode**
+
 **Command mode** -- i --> **Editor mode**
 
 
@@ -33,4 +35,5 @@ Only two modes:
 ## Copyrights?
 
 It's GNU General Public License v3.0
+
 **Feel free for use.**
