@@ -30,3 +30,7 @@ Only two modes:
     :help     - show available commands
 ```
 
+## Copyrights?
+
+It's GNU General Public License v3.0
+**Feel free for use.**
