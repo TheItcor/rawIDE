@@ -25,7 +25,7 @@ Limitations / notes:
 Usage:
     python3 rawIDE.py [optional-file-to-open]
 
-Version: 1.0 alpha
+Version: 1.1 alpha
 Author: Itcor - https://github.com/TheItcor
 '''
 
@@ -62,21 +62,87 @@ if not USE_CURSES:
 
 # --- Editor data structures ---
 class Buffer:
-    """A simple text buffer represented as list of lines."""
-    def __init__(self, lines: List[str] = None, filename: str = None):
+    """A simple text buffer represented as list of lines, with undo/redo support.
+
+    Undo/redo is implemented by storing snapshots of (lines, cx, cy).
+    """
+    def __init__(self, lines: List[str] = None, filename: str = None, undo_limit: int = 200):
         self.lines = lines or ['']
         self.filename = filename
         self.cx = 0  # cursor x (col)
         self.cy = 0  # cursor y (line)
         self.changed = False
 
+        # Undo/redo stacks hold tuples: (lines_copy, cx, cy)
+        self._undo_stack: List[Tuple[List[str], int, int]] = []
+        self._redo_stack: List[Tuple[List[str], int, int]] = []
+        self._undo_limit = undo_limit
+
+        # initial state is not pushed to undo stack by default
+
+    # --- Internal snapshot helpers ---
+    def _snapshot(self) -> Tuple[List[str], int, int]:
+        """Return a deep-ish copy snapshot of current state."""
+        return (list(self.lines), self.cx, self.cy)
+
+    def _restore_snapshot(self, snap: Tuple[List[str], int, int]):
+        """Restore from a snapshot tuple."""
+        lines, cx, cy = snap
+        self.lines = list(lines)
+        self.cx = cx
+        self.cy = cy
+        # When restoring an old snapshot, we should mark as changed (it may differ)
+        self.changed = True
+
+    def _push_undo(self):
+        """Push current state to undo stack and cap its size."""
+        self._undo_stack.append(self._snapshot())
+        if len(self._undo_stack) > self._undo_limit:
+            # drop oldest
+            del self._undo_stack[0]
+
+    def _clear_redo(self):
+        """Clear redo stack (should be called on any new edit)."""
+        self._redo_stack.clear()
+
+    # --- Public undo/redo operations ---
+    def undo(self) -> bool:
+        """Undo last operation. Returns True if undone, False if nothing to undo."""
+        if not self._undo_stack:
+            return False
+        # push current state to redo, then restore last undo
+        self._redo_stack.append(self._snapshot())
+        snap = self._undo_stack.pop()
+        self._restore_snapshot(snap)
+        return True
+
+    def redo(self) -> bool:
+        """Redo last undone operation. Returns True if redone, False if nothing to redo."""
+        if not self._redo_stack:
+            return False
+        # push current state back to undo, then restore redo snapshot
+        self._undo_stack.append(self._snapshot())
+        snap = self._redo_stack.pop()
+        self._restore_snapshot(snap)
+        return True
+
+    # --- Editing primitives (push undo before mutations) ---
     def insert_char(self, ch: str):
+        """Insert characters at current cursor position."""
+        self._push_undo()
+        self._clear_redo()
         line = self.lines[self.cy]
         self.lines[self.cy] = line[:self.cx] + ch + line[self.cx:]
         self.cx += len(ch)
         self.changed = True
 
     def backspace(self):
+        """Backspace: delete char before cursor or join with previous line."""
+        # If nothing to delete and at start of buffer, do nothing
+        if self.cx == 0 and self.cy == 0:
+            return
+        self._push_undo()
+        self._clear_redo()
         if self.cx > 0:
             line = self.lines[self.cy]
             self.lines[self.cy] = line[:self.cx-1] + line[self.cx:]
@@ -94,6 +160,9 @@ class Buffer:
             self.changed = True
 
     def newline(self):
+        """Split the current line at cursor into two lines."""
+        self._push_undo()
+        self._clear_redo()
         line = self.lines[self.cy]
         left = line[:self.cx]
         right = line[self.cx:]
@@ -103,6 +172,7 @@ class Buffer:
         self.cx = 0
         self.changed = True
 
+    # Navigation operations do not modify buffer contents, so they don't affect undo/redo
     def move_left(self):
         if self.cx > 0:
             self.cx -= 1
@@ -128,6 +198,10 @@ class Buffer:
             self.cx = min(self.cx, len(self.lines[self.cy]))
 
     def load_from_file(self, filename: str):
+        """Load content from file. This is treated as a new state (push previous to undo)."""
+        # push current state to undo so user can undo load
+        self._push_undo()
+        self._clear_redo()
         with open(filename, 'r', encoding='utf-8') as f:
             data = f.read().splitlines()
         if not data:
@@ -139,6 +213,7 @@ class Buffer:
         self.changed = False
 
     def save(self, filename: str = None):
+        """Save buffer to file. Saving does not affect undo/redo stacks themselves."""
         if filename is None:
             filename = self.filename
         if filename is None:
@@ -168,6 +243,9 @@ def run_command_and_capture(cmd: List[str], cwd: str = None, timeout: int = 10) 
 class DumbTerminal:
     """A minimal terminal renderer + input handler for platforms without curses.
     Uses ANSI codes to clear and position the cursor, and msvcrt for key detection on Windows.
+
+    Note: stdin.read based fallback can't reliably detect ctrl-key combos unless the terminal
+    forwards them as characters. On Windows with msvcrt we can read single keys.
     """
     def __init__(self):
         self.cols, self.rows = shutil.get_terminal_size((80, 24))
@@ -190,6 +268,7 @@ class DumbTerminal:
         # returns a tuple (type, value) where type may be 'char' or 'arrow' or 'ctrl'
         if msvcrt:
             ch = msvcrt.getwch()
+            # handle extended keys
             if ch == '\x00' or ch == '\xe0':
                 code = msvcrt.getwch()
                 mapping = {'H':'UP','P':'DOWN','K':'LEFT','M':'RIGHT'}
@@ -197,6 +276,7 @@ class DumbTerminal:
             else:
                 if ch == '\r':
                     return ('char', '\n')
+                # msvcrt returns control key characters too (e.g. '\x1a' for Ctrl+Z)
                 return ('char', ch)
         else:
             # fallback to blocking sys.stdin.read (user must press Enter) - very limited
@@ -419,6 +499,8 @@ class RawIDE:
                 ':cd dir - change directory\n'
                 ':mkdir dir - create directory\n'
                 ':ls [dir] - list directory\n'
+                'Ctrl+Z - undo\n'
+                'Ctrl+U - redo\n'
             )
             self.popup_text(help_text)
             return True
@@ -514,6 +596,22 @@ class RawIDE:
                 if ch == 27:  # ESC
                     self.set_mode('command')
                     continue
+
+                # handle global ctrl keys (works in both modes)
+                # Ctrl+Z = 26, Ctrl+U = 21
+                if ch == 26:
+                    if self.buffer.undo():
+                        self.status_message('Undo')
+                    else:
+                        self.status_message('Nothing to undo')
+                    continue
+                if ch == 21:
+                    if self.buffer.redo():
+                        self.status_message('Redo')
+                    else:
+                        self.status_message('Nothing to redo')
+                    continue
+
                 if self.mode == 'command':
                     # Navigation allowed in command mode
                     if ch == curses.KEY_LEFT:
@@ -590,6 +688,22 @@ class RawIDE:
                 if ktype == 'char' and val == '\x1b':
                     self.set_mode('command')
                     continue
+
+                # detect Ctrl+Z and Ctrl+U in dumb mode as well (if terminal forwards them)
+                # Ctrl+Z -> '\x1a' ; Ctrl+U -> '\x15'
+                if ktype == 'char' and val in ('\x1a', '\x1A'):
+                    if self.buffer.undo():
+                        self.status_message('Undo')
+                    else:
+                        self.status_message('Nothing to undo')
+                    continue
+                if ktype == 'char' and val in ('\x15',):
+                    if self.buffer.redo():
+                        self.status_message('Redo')
+                    else:
+                        self.status_message('Nothing to redo')
+                    continue
+
                 if self.mode == 'command':
                     if ktype == 'arrow':
                         if val == 'LEFT':
