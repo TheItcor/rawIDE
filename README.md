@@ -32,6 +32,14 @@ Only two modes:
     :help     - show available commands
 ```
 
+## Other commands:
+
+```
+    Ctrl+Z - undo
+    Ctrl+U - redo
+```
+
+
 ## Copyrights?
 
 It's GNU General Public License v3.0
